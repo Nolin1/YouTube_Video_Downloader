@@ -7,6 +7,8 @@ import queue
 from pathlib import Path
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -51,6 +53,77 @@ def run_helper_script(script_name):
         return (1, f"Exception: {e}")
 
 
+# ---------------- HTTP server to receive extension requests ----------------
+class DownloadHandler(BaseHTTPRequestHandler):
+    def do_OPTIONS(self):
+        # Handle CORS preflight requests
+        if self.path == '/download':
+            self.send_response(200)
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
+            self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+            self.end_headers()
+    
+    def do_POST(self):
+        if self.path == '/download':
+            try:
+                # Handle CORS
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.send_header('Content-Type', 'application/json')
+                
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 0:
+                    body = self.rfile.read(content_length)
+                    data = json.loads(body.decode('utf-8') if isinstance(body, bytes) else body)
+                else:
+                    data = {}
+                    
+                # Check for test request
+                if data.get('test'):
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'status': 'OK'}).encode('utf-8'))
+                    return
+
+                url = data.get('url')
+            except Exception as e:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': 'Bad request'}).encode('utf-8'))
+                return
+
+        if url:
+            try:
+                # Schedule the download on the GUI thread
+                self.server.app.start_download_from_extension(url)
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(json.dumps({'status': 'Download scheduled'}).encode('utf-8'))
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': f'Error: {e}'}).encode('utf-8'))
+        else:
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(json.dumps({'error': 'Missing URL'}).encode('utf-8'))
+    
+    def log_message(self, format, *args):
+        # Suppress normal HTTP logging to reduce clutter
+        return
+
+
+def start_server(app, host='localhost', port=5678):
+    try:
+        server = HTTPServer((host, port), DownloadHandler)
+        server.app = app
+        print(f"[SERVER] Listening on http://{host}:{port}/download")
+        server.serve_forever()
+    except OSError as e:
+        print(f"[SERVER] Failed to start server on {host}:{port}: {e}")
+
+
+# ---------------- Main App ----------------
 class DownloaderApp(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -66,6 +139,10 @@ class DownloaderApp(ctk.CTk):
 
         self._build_ui()
         self._check_tools()
+
+        # Start HTTP server thread for browser extension
+        threading.Thread(target=start_server, args=(self,), daemon=True).start()
+
         self.after(200, self._flush_output_queue)
 
     def _build_ui(self):
@@ -224,6 +301,27 @@ class DownloaderApp(ctk.CTk):
             self.status_box.insert("end", text + "\n")
             self.status_box.see("end")
         self.after(200, self._flush_output_queue)
+
+    # This method is called by the HTTP server thread (via start_server -> handler).
+    # It safely schedules the GUI action on the main thread.
+    def start_download_from_extension(self, url):
+        def _schedule():
+            if self.downloading:
+                # already downloading; ignore incoming request
+                self._append_status("Received URL from extension but a download is already in progress. Ignoring.")
+                return
+            # put the URL in the entry and start
+            self.url_entry.delete(0, "end")
+            self.url_entry.insert(0, url)
+            # call the same start logic as if user clicked Start
+            self._start_clicked()
+
+        # schedule on main thread
+        try:
+            self.after(0, _schedule)
+        except Exception:
+            # if scheduling fails, fallback to direct call (best effort)
+            _schedule()
 
 
 if __name__ == "__main__":
