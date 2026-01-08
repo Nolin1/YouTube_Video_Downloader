@@ -23,7 +23,10 @@ cd Y-TOT
 ```
 ### Remove Git history (optional)
 ```bash
-rmdir /s /q .git   # Windows
+rmdir /s /q .git   # CMD
+```
+```bash
+Remove-Item -Recurse -Force .git    #PowerShell
 ```
 
 ### Run the Application
